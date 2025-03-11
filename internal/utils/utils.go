@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"fmt"
 	"net"
 	"strings"
 )
@@ -48,25 +47,4 @@ func IsLocalIP(ip string) bool {
 		}
 	}
 	return false
-}
-
-func ParseIPToBytes(value string) ([]byte, error) {
-	value = strings.TrimSpace(value)
-	ip := net.ParseIP(value)
-	if ip == nil {
-		// try to parse as MAC
-		macAddr, err := net.ParseMAC(value)
-		if err != nil {
-			return nil, fmt.Errorf("invalid value: %s", value)
-		}
-
-		return macAddr, nil
-	}
-	if ip.To4() != nil && len(ip) == net.IPv4len {
-		return ip.To4(), nil
-	} else if ip.To16() != nil && len(ip) == net.IPv6len {
-		return ip.To16(), nil
-	} else {
-		return nil, fmt.Errorf("invalid value: %s", value)
-	}
 }

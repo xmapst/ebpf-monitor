@@ -62,7 +62,7 @@ type sPacketInfo struct {
 	DstPort   uint16
 	SrcMAC    [6]byte
 	DstMAC    [6]byte
-	EthProto  EthernetType
+	EthType   EthernetType
 	IPProto   IPProtocol
 	PktSize   uint32
 	Direction uint8
@@ -77,8 +77,8 @@ type SPacket struct {
 	DstIP     string       `json:"dst_ip"`
 	DstPort   uint16       `json:"dst_port"`
 	Size      uint32       `json:"size"`
-	Type      EthernetType `json:"type"`
-	Proto     IPProtocol   `json:"proto"`
+	EthType   EthernetType `json:"type"`
+	IPProto   IPProtocol   `json:"proto"`
 	Direction string       `json:"direction"`
 }
 
@@ -102,10 +102,10 @@ func (pi *sPacketInfo) DirectionStr() string {
 // ToPacket 转换PacketInfo 为 Packet
 func (pi *sPacketInfo) toPacket() *SPacket {
 	var srcIP, dstIP string
-	if pi.EthProto == EthernetType(0x0800) { // IPv4
+	if pi.EthType == EthernetType(0x0800) { // IPv4
 		srcIP = net.IP(pi.SrcIP[:]).String()
 		dstIP = net.IP(pi.DstIP[:]).String()
-	} else if pi.EthProto == EthernetType(0x86DD) { // IPv6
+	} else if pi.EthType == EthernetType(0x86DD) { // IPv6
 		srcIP = net.IP(pi.SrcIPv6[:]).String()
 		dstIP = net.IP(pi.DstIPv6[:]).String()
 	}
@@ -119,8 +119,8 @@ func (pi *sPacketInfo) toPacket() *SPacket {
 		SrcPort:   pi.SrcPort,
 		DstPort:   pi.DstPort,
 		Size:      pi.PktSize,
-		Type:      pi.EthProto,
-		Proto:     pi.IPProto,
+		EthType:   pi.EthType,
+		IPProto:   pi.IPProto,
 		Direction: pi.DirectionStr(),
 	}
 
@@ -129,4 +129,9 @@ func (pi *sPacketInfo) toPacket() *SPacket {
 
 func (p *SPacket) Marshal() ([]byte, error) {
 	return json.Marshal(p)
+}
+
+type ipKey struct {
+	Family uint32
+	Addr   [16]byte
 }

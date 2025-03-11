@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"syscall"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -53,7 +54,11 @@ func (m *sManager) Start() error {
 		return err
 	}
 	var ebpfObj ebpfObjects
-	if err = loadEbpfObjects(&ebpfObj, nil); err != nil {
+	if err = loadEbpfObjects(&ebpfObj, &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel: ebpf.LogLevelInstruction,
+		},
+	}); err != nil {
 		return err
 	}
 
@@ -96,6 +101,7 @@ func (m *sManager) attachTCXEgress(index int) error {
 		Program:   m.objects.EgressProg,
 		Interface: index,
 		Attach:    ebpf.AttachTCXEgress,
+		Anchor:    link.Head(),
 	})
 	if err != nil {
 		return err
@@ -146,11 +152,23 @@ func (m *sManager) Close() {
 }
 
 // AddRule 添加限速规则
-func (m *sManager) AddRule(sip string, rate int) error {
+func (m *sManager) AddRule(sip string, limit int) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
 	}
-	if err := m.objects.RateLimitMap.Put([]byte(sip), uint32(rate)); err != nil {
+	ip := net.ParseIP(sip)
+	if ip == nil {
+		return errors.New("invalid sip")
+	}
+	var key ipKey
+	if ip4 := ip.To4(); ip4 != nil {
+		key.Family = syscall.AF_INET
+		copy(key.Addr[:4], ip4)
+	} else {
+		key.Family = syscall.AF_INET6
+		copy(key.Addr[:], ip.To16())
+	}
+	if err := m.objects.RateLimitMap.Put(key, uint32(limit)); err != nil {
 		return err
 	}
 	return nil
@@ -161,7 +179,19 @@ func (m *sManager) DelRule(sip string) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
 	}
-	if err := m.objects.RateLimitMap.Delete([]byte(sip)); err != nil {
+	ip := net.ParseIP(sip)
+	if ip == nil {
+		return errors.New("invalid sip")
+	}
+	var key ipKey
+	if ip4 := ip.To4(); ip4 != nil {
+		key.Family = syscall.AF_INET
+		copy(key.Addr[:4], ip4)
+	} else {
+		key.Family = syscall.AF_INET6
+		copy(key.Addr[:], ip.To16())
+	}
+	if err := m.objects.RateLimitMap.Delete(key); err != nil {
 		return err
 	}
 	return nil

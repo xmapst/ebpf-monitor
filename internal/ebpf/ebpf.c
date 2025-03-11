@@ -1,9 +1,5 @@
 //go:build ignore
-/*
- * 基于 TCX 监控程序
- * 功能:
- * - TCP/UDP 协议解析，上报事件
- */
+#include <stdbool.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -15,34 +11,34 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-/* 数据包信息结构，总大小：65 字节 */
+#define AF_INET 2
+#define AF_INET6 10
+
+struct ip_key {
+    __u32 family;
+    __u8 addr[16];
+};
+
 struct packet_info {
-    // 网络层 - IPv4 地址
-    __be32 src_ip;                   // 源 IPv4 地址
-    __be32 dst_ip;                   // 目的 IPv4 地址
+    __be32 src_ip;
+    __be32 dst_ip;
+    __be32 src_ipv6[4];
+    __be32 dst_ipv6[4];
+    __be16 src_port;
+    __be16 dst_port;
+    unsigned char src_mac[ETH_ALEN];
+    unsigned char dst_mac[ETH_ALEN];
+    __u16 eth_proto;
+    __u16 ip_proto;
+    __u32 pkt_size;
+    __u8 direction;
+} __attribute__((packed));
 
-    // 网络层 - IPv6 地址
-    __be32 src_ipv6[4];              // 源 IPv6 地址 (128 位)
-    __be32 dst_ipv6[4];              // 目的 IPv6 地址 (128 位)
+struct token_bucket {
+    __u64 tokens;
+    __u64 last_update;
+};
 
-    // 传输层
-    __be16 src_port;                 // 源端口 (TCP/UDP)
-    __be16 dst_port;                 // 目的端口 (TCP/UDP)
-
-    // 链路层
-    unsigned char src_mac[ETH_ALEN]; // 源 MAC 地址
-    unsigned char dst_mac[ETH_ALEN]; // 目的 MAC 地址
-
-    // 协议相关信息
-    __u16 eth_proto;                 // 以太网协议类型
-    __u16 ip_proto;                  // IP 协议号
-
-    // 元数据
-    __u32 pkt_size;                  // 数据包总大小
-    __u8 direction;                  // 数据包方向，1: ingress, 2: egress
-} __attribute__((packed));           // 65 字节
-
-/* 上报数据包事件的 perf event map */
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
@@ -50,87 +46,119 @@ struct {
     __uint(max_entries, 128);
 } events SEC(".maps");
 
-/*
- * 用于存放每个源 IP 的限速配置
- * key: IPv4 地址 (__be32)
- * value: 每秒允许的最大数据包数 (u32)
- */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__be32));
+    __uint(key_size, sizeof(struct ip_key));
     __uint(value_size, sizeof(__u32));
-    __uint(max_entries, 1024);
+    __uint(max_entries, 2048);
 } rate_limit_map SEC(".maps");
 
-/* 解析 TCP/UDP 头部信息 */
-static __always_inline void parse_transport(struct packet_info *pkt_info, void *data, void *data_end, __u8 proto)
-{
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(key_size, sizeof(struct ip_key));
+    __uint(value_size, sizeof(struct token_bucket));
+    __uint(max_entries, 8192);
+} token_map SEC(".maps");
+
+/* 内联解析传输层头部，减少分支调用 */
+static __always_inline void parse_transport(struct packet_info *pkt_info, void *data, void *data_end, __u8 proto) {
     pkt_info->ip_proto = proto;
     pkt_info->src_port = 0;
     pkt_info->dst_port = 0;
 
-    switch (proto) {
-    case IPPROTO_TCP: {
-        if (data + sizeof(struct tcphdr) > data_end)
-            return;
+    if (proto == IPPROTO_TCP) {
         struct tcphdr *tcp = data;
-        pkt_info->src_port = bpf_ntohs(tcp->source);
-        pkt_info->dst_port = bpf_ntohs(tcp->dest);
-        break;
-    }
-    case IPPROTO_UDP: {
-        if (data + sizeof(struct udphdr) > data_end)
-            return;
+        if ((void*)(tcp + 1) <= data_end) {
+            pkt_info->src_port = bpf_ntohs(tcp->source);
+            pkt_info->dst_port = bpf_ntohs(tcp->dest);
+        }
+    } else if (proto == IPPROTO_UDP) {
         struct udphdr *udp = data;
-        pkt_info->src_port = bpf_ntohs(udp->source);
-        pkt_info->dst_port = bpf_ntohs(udp->dest);
-        break;
-    }
-    default:
-        break;
+        if ((void*)(udp + 1) <= data_end) {
+            pkt_info->src_port = bpf_ntohs(udp->source);
+            pkt_info->dst_port = bpf_ntohs(udp->dest);
+        }
     }
 }
 
-/* 处理 ingress/egress 链路数据 */
-static __always_inline int process_packet(struct __sk_buff *skb, __u8 direction)
-{
+/* 内联 token bucket 检查，减少重复 map 查找和计算 */
+static __always_inline bool rate_limit_check(struct ip_key *key, __u32 rate_limit) {
+    struct token_bucket *tb;
+    __u64 now = bpf_ktime_get_ns();
+
+    tb = bpf_map_lookup_elem(&token_map, key);
+    if (!tb) {
+        struct token_bucket new_tb = {
+            .tokens = rate_limit,
+            .last_update = now,
+        };
+        bpf_map_update_elem(&token_map, key, &new_tb, BPF_NOEXIST);
+        return true;
+    }
+    __u64 elapsed = now - tb->last_update;
+    __u64 tokens_to_add = (elapsed * rate_limit) / 1000000000ULL;
+
+    if (tokens_to_add > 0) {
+        tb->tokens = (tb->tokens + tokens_to_add > rate_limit) ? rate_limit : tb->tokens + tokens_to_add;
+        tb->last_update = now;
+    }
+    if (tb->tokens >= 1) {
+        tb->tokens--;
+        return true;
+    }
+    return false;
+}
+
+/* 处理数据包主逻辑 */
+static __always_inline int process_packet(struct __sk_buff *skb, __u8 direction) {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-    struct packet_info pkt_info = {0};
-    struct ethhdr eth_hdr = {0};
-    int offset = 0;
+    struct packet_info pkt_info = {};
+    struct ethhdr *eth = data;  // 直接取数据指针（需保证数据连续）
+    struct ip_key rate_key = {};
 
-    /* 检查数据包边界 */
-    if (data + sizeof(eth_hdr) > data_end)
+    if ((void*)(eth + 1) > data_end)
         return TC_ACT_OK;
 
-    if (bpf_skb_load_bytes(skb, 0, &eth_hdr, sizeof(eth_hdr)) < 0)
-        return TC_ACT_OK;
-
-    __builtin_memcpy(pkt_info.src_mac, eth_hdr.h_source, ETH_ALEN);
-    __builtin_memcpy(pkt_info.dst_mac, eth_hdr.h_dest, ETH_ALEN);
-    pkt_info.eth_proto = bpf_ntohs(eth_hdr.h_proto);
-    pkt_info.pkt_size = data_end - data;
+    __builtin_memcpy(pkt_info.src_mac, eth->h_source, ETH_ALEN);
+    __builtin_memcpy(pkt_info.dst_mac, eth->h_dest, ETH_ALEN);
+    pkt_info.eth_proto = bpf_ntohs(eth->h_proto);
+    pkt_info.pkt_size = (__u32)(data_end - data);
     pkt_info.direction = direction;
 
-    offset = sizeof(eth_hdr);
+    int offset = sizeof(*eth);
 
     if (pkt_info.eth_proto == ETH_P_IP) {
-        struct iphdr ip = {0};
-        if (bpf_skb_load_bytes(skb, offset, &ip, sizeof(ip)) < 0)
+        struct iphdr *ip = data + offset;
+        if ((void*)(ip + 1) > data_end)
             goto submit;
-        pkt_info.src_ip = ip.saddr;
-        pkt_info.dst_ip = ip.daddr;
-        offset += sizeof(ip);
-        parse_transport(&pkt_info, data + sizeof(eth_hdr) + sizeof(ip), data_end, ip.protocol);
+        rate_key.family = AF_INET;
+        __builtin_memcpy(rate_key.addr, &ip->saddr, 4);
+        pkt_info.src_ip = ip->saddr;
+        pkt_info.dst_ip = ip->daddr;
+        offset += ip->ihl * 4;
+        parse_transport(&pkt_info, data + offset, data_end, ip->protocol);
     } else if (pkt_info.eth_proto == ETH_P_IPV6) {
-        struct ipv6hdr ip6 = {0};
-        if (bpf_skb_load_bytes(skb, offset, &ip6, sizeof(ip6)) < 0)
+        struct ipv6hdr *ip6 = data + offset;
+        if ((void*)(ip6 + 1) > data_end)
             goto submit;
-        __builtin_memcpy(pkt_info.src_ipv6, &ip6.saddr, sizeof(ip6.saddr));
-        __builtin_memcpy(pkt_info.dst_ipv6, &ip6.daddr, sizeof(ip6.daddr));
-        offset += sizeof(ip6);
-        parse_transport(&pkt_info, data + sizeof(eth_hdr) + sizeof(ip6), data_end, ip6.nexthdr);
+        rate_key.family = AF_INET6;
+        __builtin_memcpy(rate_key.addr, ip6->saddr.s6_addr32, 16);
+        __builtin_memcpy(pkt_info.src_ipv6, ip6->saddr.s6_addr32, 16);
+        __builtin_memcpy(pkt_info.dst_ipv6, ip6->daddr.s6_addr32, 16);
+        offset += sizeof(*ip6);
+        parse_transport(&pkt_info, data + offset, data_end, ip6->nexthdr);
+    } else {
+        goto submit;
+    }
+
+    /* ingress 模式下执行速率限制 */
+    if (direction == 1) {
+        __u32 *rate_limit = bpf_map_lookup_elem(&rate_limit_map, &rate_key);
+        if (rate_limit && *rate_limit > 0) {
+            if (!rate_limit_check(&rate_key, *rate_limit))
+                return TC_ACT_SHOT;
+        }
     }
 
 submit:
@@ -138,17 +166,13 @@ submit:
     return TC_ACT_OK;
 }
 
-/* TCX ingress 程序入口点 */
 SEC("tcx/ingress")
-int ingress_prog(struct __sk_buff *skb)
-{
+int ingress_prog(struct __sk_buff *skb) {
     return process_packet(skb, 1);
 }
 
-/* TCX egress 程序入口点 */
 SEC("tcx/egress")
-int egress_prog(struct __sk_buff *skb)
-{
+int egress_prog(struct __sk_buff *skb) {
     return process_packet(skb, 2);
 }
 
