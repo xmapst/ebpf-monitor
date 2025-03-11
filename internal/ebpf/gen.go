@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go xdp xdp.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go ebpf ebpf.c
 
 type EthernetType uint16
 
@@ -54,17 +54,18 @@ func (protocol IPProtocol) MarshalJSON() ([]byte, error) {
 }
 
 type sPacketInfo struct {
-	SrcIP    [4]byte
-	DstIP    [4]byte
-	SrcIPv6  [16]byte
-	DstIPv6  [16]byte
-	SrcPort  uint16
-	DstPort  uint16
-	SrcMAC   [6]byte
-	DstMAC   [6]byte
-	EthProto EthernetType
-	IPProto  IPProtocol
-	PktSize  uint32
+	SrcIP     [4]byte
+	DstIP     [4]byte
+	SrcIPv6   [16]byte
+	DstIPv6   [16]byte
+	SrcPort   uint16
+	DstPort   uint16
+	SrcMAC    [6]byte
+	DstMAC    [6]byte
+	EthProto  EthernetType
+	IPProto   IPProtocol
+	PktSize   uint32
+	Direction uint8
 }
 
 type SPacket struct {
@@ -78,6 +79,18 @@ type SPacket struct {
 	Size      uint32       `json:"size"`
 	Type      EthernetType `json:"type"`
 	Proto     IPProtocol   `json:"proto"`
+	Direction string       `json:"direction"`
+}
+
+func (pi *sPacketInfo) DirectionStr() string {
+	switch pi.Direction {
+	case 1:
+		return "ingress"
+	case 2:
+		return "egress"
+	default:
+		return "unknown"
+	}
 }
 
 // ToPacket 转换PacketInfo 为 Packet
@@ -102,6 +115,7 @@ func (pi *sPacketInfo) toPacket() *SPacket {
 		Size:      pi.PktSize,
 		Type:      pi.EthProto,
 		Proto:     pi.IPProto,
+		Direction: pi.DirectionStr(),
 	}
 
 	return packet

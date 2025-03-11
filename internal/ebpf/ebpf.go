@@ -5,12 +5,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"os"
-	"strings"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
@@ -19,16 +18,14 @@ import (
 type IManager interface {
 	Start() error
 	Close()
-	GetLinkType() string
 }
 
-type SManager struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	objects  *xdpObjects
-	link     []*link.Link
-	reader   *perf.Reader
-	linkType string
+type sManager struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	objects *ebpfObjects
+	links   []*link.Link
+	reader  *perf.Reader
 
 	ifname  string
 	eventCh chan *SPacket
@@ -36,7 +33,7 @@ type SManager struct {
 
 func New(ifname string, eventCh chan *SPacket) IManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &SManager{
+	return &sManager{
 		ctx:     ctx,
 		cancel:  cancel,
 		ifname:  ifname,
@@ -44,22 +41,27 @@ func New(ifname string, eventCh chan *SPacket) IManager {
 	}
 }
 
-func (m *SManager) Start() error {
+func (m *sManager) Start() error {
 	iface, err := net.InterfaceByName(m.ifname)
 	if err != nil {
-		return fmt.Errorf("failed to get interface %s: %s", m.ifname, err)
+		return err
 	}
 
 	if err = rlimit.RemoveMemlock(); err != nil {
-		log.Printf("failed to remove memlock: %s", err.Error())
+		return err
 	}
-	var ebpfObj xdpObjects
-	if err = loadXdpObjects(&ebpfObj, nil); err != nil {
-		return fmt.Errorf("failed to load eBPF objects: %s", err.Error())
+	var ebpfObj ebpfObjects
+	if err = loadEbpfObjects(&ebpfObj, nil); err != nil {
+		return err
 	}
 
 	m.objects = &ebpfObj
-	err = m.attachXDP(iface.Index)
+	err = m.attachTCXIngress(iface.Index)
+	if err != nil {
+		m.Close()
+		return err
+	}
+	err = m.attachTCXEgress(iface.Index)
 	if err != nil {
 		m.Close()
 		return err
@@ -68,34 +70,39 @@ func (m *SManager) Start() error {
 	m.reader, err = perf.NewReader(m.objects.Events, os.Getpagesize())
 	if err != nil {
 		m.Close()
-		return fmt.Errorf("failed to create perf event reader: %s", err.Error())
+		return err
 	}
 	go m.monitorEvents()
 	return nil
 }
 
-func (m *SManager) attachXDP(index int) error {
-	flagNames := []string{"offload", "driver", "generic"}
-	var errs []string
-	for i, mode := range []link.XDPAttachFlags{link.XDPOffloadMode, link.XDPDriverMode, link.XDPGenericMode} {
-		flagName := flagNames[i]
-		l, err := link.AttachXDP(link.XDPOptions{
-			Program:   m.objects.XdpProgram,
-			Interface: index,
-			Flags:     mode,
-		})
-		if err == nil {
-			m.linkType = flagName
-			m.link = append(m.link, &l)
-			log.Printf("XDP program attached successfully, current mode: %s", flagName)
-			return nil
-		}
-		errs = append(errs, fmt.Sprintf("failed to attach XDP program with %s mode: %s", flagName, err.Error()))
+func (m *sManager) attachTCXIngress(index int) error {
+	l, err := link.AttachTCX(link.TCXOptions{
+		Program:   m.objects.IngressProg,
+		Interface: index,
+		Attach:    ebpf.AttachTCXIngress,
+	})
+	if err != nil {
+		return err
 	}
-	return errors.New(strings.Join(errs, "\n"))
+	m.links = append(m.links, &l)
+	return nil
 }
 
-func (m *SManager) monitorEvents() {
+func (m *sManager) attachTCXEgress(index int) error {
+	l, err := link.AttachTCX(link.TCXOptions{
+		Program:   m.objects.EgressProg,
+		Interface: index,
+		Attach:    ebpf.AttachTCXEgress,
+	})
+	if err != nil {
+		return err
+	}
+	m.links = append(m.links, &l)
+	return nil
+}
+
+func (m *sManager) monitorEvents() {
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -106,7 +113,7 @@ func (m *SManager) monitorEvents() {
 				if errors.Is(err, perf.ErrClosed) {
 					return
 				}
-				log.Printf("[ERROR] failed to read perf event record: %s", err)
+				log.Println(err)
 				continue
 			}
 			var pi = new(sPacketInfo)
@@ -122,20 +129,16 @@ func (m *SManager) monitorEvents() {
 	}
 }
 
-func (m *SManager) Close() {
+func (m *sManager) Close() {
 	m.cancel()
 	if m.reader != nil {
 		_ = m.reader.Close()
 	}
-	for _, l := range m.link {
+	for _, l := range m.links {
 		_ = (*l).Close()
 	}
 	if m.objects != nil {
 		_ = m.objects.Close()
 	}
 	return
-}
-
-func (m *SManager) GetLinkType() string {
-	return m.linkType
 }
