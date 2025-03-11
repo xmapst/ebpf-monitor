@@ -82,14 +82,20 @@ type SPacket struct {
 	Direction string       `json:"direction"`
 }
 
+const (
+	FlowDirectionUnknown = "unknown"
+	FlowDirectionIngress = "ingress"
+	FlowDirectionEgress  = "egress"
+)
+
 func (pi *sPacketInfo) DirectionStr() string {
 	switch pi.Direction {
 	case 1:
-		return "ingress"
+		return FlowDirectionIngress
 	case 2:
-		return "egress"
+		return FlowDirectionEgress
 	default:
-		return "unknown"
+		return FlowDirectionUnknown
 	}
 }
 
