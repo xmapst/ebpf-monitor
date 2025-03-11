@@ -18,6 +18,8 @@ import (
 type IManager interface {
 	Start() error
 	Close()
+	AddRule(sip string, rate int) error
+	DelRule(sip string) error
 }
 
 type sManager struct {
@@ -141,4 +143,26 @@ func (m *sManager) Close() {
 		_ = m.objects.Close()
 	}
 	return
+}
+
+// AddRule 添加限速规则
+func (m *sManager) AddRule(sip string, rate int) error {
+	if m.objects == nil {
+		return errors.New("ebpf objects is nil")
+	}
+	if err := m.objects.RateLimitMap.Put([]byte(sip), uint32(rate)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DelRule 删除限速规则
+func (m *sManager) DelRule(sip string) error {
+	if m.objects == nil {
+		return errors.New("ebpf objects is nil")
+	}
+	if err := m.objects.RateLimitMap.Delete([]byte(sip)); err != nil {
+		return err
+	}
+	return nil
 }

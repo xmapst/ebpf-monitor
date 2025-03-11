@@ -50,6 +50,18 @@ struct {
     __uint(max_entries, 128);
 } events SEC(".maps");
 
+/*
+ * 用于存放每个源 IP 的限速配置
+ * key: IPv4 地址 (__be32)
+ * value: 每秒允许的最大数据包数 (u32)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(__be32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, 1024);
+} rate_limit_map SEC(".maps");
+
 /* 解析 TCP/UDP 头部信息 */
 static __always_inline void parse_transport(struct packet_info *pkt_info, void *data, void *data_end, __u8 proto)
 {
