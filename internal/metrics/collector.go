@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,6 +29,7 @@ type STrafficMetrics struct {
 type SStatistics struct {
 	Mac         string          `json:"mac"`
 	IP          string          `json:"ip"`
+	Hostname    string          `json:"hostname,omitempty"`
 	Upload      STrafficMetrics `json:"upload"`
 	Download    STrafficMetrics `json:"download"`
 	FirstSeenAt int64           `json:"first_seen_at"`
@@ -170,6 +172,15 @@ func (mc *SCollector) CollectPacket(packet *ebpf.SPacket) {
 		IP:          packet.SrcIP,
 		FirstSeenAt: time.Now().Unix(),
 		LastSeenAt:  time.Now().Unix(),
+	}
+	domains, err := net.LookupAddr(packet.SrcIP)
+	if err == nil {
+		for _, domain := range domains {
+			if domain != "" {
+				domain = domain[:len(domain)-1]
+				break
+			}
+		}
 	}
 	if packet.Direction == ebpf.FlowDirectionIngress {
 		mc.summary.Upload.TotalBytes += int64(packet.Size)
