@@ -15,6 +15,10 @@ import (
 	"github.com/xmapst/ebpf-monitor/internal/ebpf"
 )
 
+const (
+	retentionDuration = time.Hour * 24 * 15 // 15天
+)
+
 type SMetricsSummary struct {
 	Upload   STrafficMetrics         `json:"upload"`
 	Download STrafficMetrics         `json:"download"`
@@ -37,7 +41,6 @@ type SStatistics struct {
 	LastSeenAt  int64           `json:"last_seen_at"`
 }
 
-// SCollector handles the collection and aggregation of network metrics
 type SCollector struct {
 	sync.RWMutex
 	summary  SMetricsSummary
@@ -45,24 +48,22 @@ type SCollector struct {
 	filePath string
 }
 
-// New creates and initializes a new metrics collector instance
 func New(dir string) *SCollector {
 	_ = os.MkdirAll(dir, 0755)
+	filePath := filepath.Join(dir, "metrics.json")
 	mc := &SCollector{
-		filePath: filepath.Join(dir, "metrics.json"),
+		filePath: filePath,
 		done:     make(chan struct{}),
 	}
 
-	var summary SMetricsSummary
+	// 初始化 summary：加载历史数据或新建
 	if metrics, err := mc.load(); err == nil && metrics != nil {
-		summary = *metrics
+		mc.summary = *metrics
 	} else {
-		summary = SMetricsSummary{
+		mc.summary = SMetricsSummary{
 			Items: make(map[string]*SStatistics),
 		}
 	}
-
-	mc.summary = summary
 
 	go mc.autoCleanup()
 	go mc.autoPersist()
@@ -99,9 +100,8 @@ func (mc *SCollector) load() (*SMetricsSummary, error) {
 	return &metrics, nil
 }
 
-// periodically persist metrics data
 func (mc *SCollector) autoPersist() {
-	ticker := time.NewTicker(time.Minute * 1)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -115,7 +115,6 @@ func (mc *SCollector) autoPersist() {
 	}
 }
 
-// periodically removes stale metrics data
 func (mc *SCollector) autoCleanup() {
 	ticker := time.NewTicker(time.Minute * 10)
 	defer ticker.Stop()
@@ -124,7 +123,7 @@ func (mc *SCollector) autoCleanup() {
 		case <-mc.done:
 			return
 		case <-ticker.C:
-			mc.CleanupStaleMetrics(time.Hour * 24 * 15)
+			mc.CleanupStaleMetrics(retentionDuration)
 		}
 	}
 }
@@ -140,64 +139,66 @@ func (mc *SCollector) CleanupStaleMetrics(retention time.Duration) {
 	}
 }
 
-// CollectPacket processes metrics for a single packet
+func (mc *SCollector) updateTrafficMetrics(tm *STrafficMetrics, size uint32) {
+	tm.TotalBytes += int64(size)
+	tm.TotalPackets++
+	// 用最近一次的包大小作为当前值，可根据需求调整为累计值
+	tm.Bytes = int64(size)
+}
+
 func (mc *SCollector) CollectPacket(packet *ebpf.SPacket) {
+	now := time.Now().Unix()
 	mc.Lock()
 	defer mc.Unlock()
 
-	key := fmt.Sprintf("%s#%s", packet.SrcMAC, packet.SrcIP)
+	var (
+		mac = packet.SrcMAC
+		ip  = packet.SrcIP
+	)
 	if packet.Direction == ebpf.FlowDirectionEgress {
-		key = fmt.Sprintf("%s#%s", packet.DstMAC, packet.DstIP)
+		mac = packet.DstMAC
+		ip = packet.DstIP
 	}
-	if stats, ok := mc.summary.Items[key]; ok {
-		stats.LastSeenAt = time.Now().Unix()
+	key := fmt.Sprintf("%s#%s", mac, ip)
+
+	stats, exists := mc.summary.Items[key]
+	if exists {
+		stats.LastSeenAt = now
 		if packet.Direction == ebpf.FlowDirectionIngress {
-			mc.summary.Upload.TotalBytes += int64(packet.Size)
-			mc.summary.Upload.TotalPackets += 1
-
-			stats.Upload.TotalBytes += int64(packet.Size)
-			stats.Upload.TotalPackets += 1
-			stats.Upload.Bytes = int64(packet.Size)
+			mc.updateTrafficMetrics(&mc.summary.Upload, packet.Size)
+			mc.updateTrafficMetrics(&stats.Upload, packet.Size)
 		} else {
-			mc.summary.Download.TotalBytes += int64(packet.Size)
-			mc.summary.Download.TotalPackets += 1
-
-			stats.Download.TotalBytes += int64(packet.Size)
-			stats.Download.TotalPackets += 1
-			stats.Download.Bytes = int64(packet.Size)
+			mc.updateTrafficMetrics(&mc.summary.Download, packet.Size)
+			mc.updateTrafficMetrics(&stats.Download, packet.Size)
 		}
 		return
 	}
-	stats := &SStatistics{
-		Mac:         packet.SrcMAC,
-		IP:          packet.SrcIP,
-		FirstSeenAt: time.Now().Unix(),
-		LastSeenAt:  time.Now().Unix(),
+
+	// 新建统计项
+	stats = &SStatistics{
+		Mac:         mac,
+		IP:          ip,
+		FirstSeenAt: now,
+		LastSeenAt:  now,
 	}
-	domains, err := net.LookupAddr(packet.SrcIP.String())
-	if err == nil {
-		for _, domain := range domains {
-			if domain != "" {
-				domain = domain[:len(domain)-1]
-				break
-			}
+	// 尝试反向解析域名
+	if domains, err := net.LookupAddr(ip.String()); err == nil && len(domains) > 0 {
+		// 去掉末尾的点
+		if len(domains[0]) > 0 && domains[0][len(domains[0])-1] == '.' {
+			stats.Hostname = domains[0][:len(domains[0])-1]
+		} else {
+			stats.Hostname = domains[0]
 		}
 	}
+
 	if packet.Direction == ebpf.FlowDirectionIngress {
-		mc.summary.Upload.TotalBytes += int64(packet.Size)
-		mc.summary.Upload.TotalPackets += 1
-
-		stats.Upload.TotalBytes = int64(packet.Size)
-		stats.Upload.TotalPackets = 1
-		stats.Upload.Bytes = int64(packet.Size)
+		mc.updateTrafficMetrics(&mc.summary.Upload, packet.Size)
+		mc.updateTrafficMetrics(&stats.Upload, packet.Size)
 	} else {
-		mc.summary.Download.TotalBytes += int64(packet.Size)
-		mc.summary.Download.TotalPackets += 1
-
-		stats.Download.TotalBytes = int64(packet.Size)
-		stats.Download.TotalPackets = 1
-		stats.Download.Bytes = int64(packet.Size)
+		mc.updateTrafficMetrics(&mc.summary.Download, packet.Size)
+		mc.updateTrafficMetrics(&stats.Download, packet.Size)
 	}
+
 	mc.summary.Items[key] = stats
 }
 
@@ -216,6 +217,8 @@ func (mc *SCollector) GenerateReport(page int, pageSize int, order string, sortD
 	for _, stats := range mc.summary.Items {
 		result = append(result, *stats)
 	}
+
+	// 根据 order 参数获取排序字段
 	getField := func(s SStatistics) int64 {
 		switch order {
 		case "upload":
@@ -224,7 +227,7 @@ func (mc *SCollector) GenerateReport(page int, pageSize int, order string, sortD
 			return s.Download.Bytes
 		case "first_seen_at":
 			return s.FirstSeenAt
-		default: // last_seen_at
+		default: // 默认为 last_seen_at
 			return s.LastSeenAt
 		}
 	}
@@ -238,10 +241,10 @@ func (mc *SCollector) GenerateReport(page int, pageSize int, order string, sortD
 		}
 		return getField(result[i]) < getField(result[j])
 	})
-	if page == 0 {
+	if page <= 0 {
 		page = 1
 	}
-	if pageSize == 0 {
+	if pageSize <= 0 {
 		pageSize = 20
 	}
 	start := (page - 1) * pageSize

@@ -98,7 +98,7 @@ static __always_inline bool rate_limit_check(struct ip_key *key, __u32 rate_limi
     __u64 elapsed = now - tb->last_update;
     __u64 tokens_to_add = (elapsed * rate_limit) / 1000000000ULL;
 
-    if (tokens_to_add > 0) {
+    if (tokens_to_add) {
         tb->tokens = (tb->tokens + tokens_to_add > rate_limit) ? rate_limit : tb->tokens + tokens_to_add;
         tb->last_update = now;
     }
@@ -133,7 +133,7 @@ static __always_inline int process_packet(struct __sk_buff *skb, __u8 direction)
         if ((void*)(ip + 1) > data_end)
             goto submit;
         rate_key.family = AF_INET;
-        __builtin_memcpy(rate_key.addr, &ip->saddr, 4);
+        __builtin_memcpy(rate_key.addr, &ip->saddr, sizeof(ip->saddr));
         pkt_info.src_ip = ip->saddr;
         pkt_info.dst_ip = ip->daddr;
         offset += ip->ihl * 4;
@@ -143,9 +143,9 @@ static __always_inline int process_packet(struct __sk_buff *skb, __u8 direction)
         if ((void*)(ip6 + 1) > data_end)
             goto submit;
         rate_key.family = AF_INET6;
-        __builtin_memcpy(rate_key.addr, ip6->saddr.s6_addr32, 16);
-        __builtin_memcpy(pkt_info.src_ipv6, ip6->saddr.s6_addr32, 16);
-        __builtin_memcpy(pkt_info.dst_ipv6, ip6->daddr.s6_addr32, 16);
+        __builtin_memcpy(rate_key.addr, ip6->saddr.s6_addr32, sizeof(ip6->saddr.s6_addr32));
+        __builtin_memcpy(pkt_info.src_ipv6, ip6->saddr.s6_addr32, sizeof(ip6->saddr.s6_addr32));
+        __builtin_memcpy(pkt_info.dst_ipv6, ip6->daddr.s6_addr32, sizeof(ip6->daddr.s6_addr32));
         offset += sizeof(*ip6);
         parse_transport(&pkt_info, data + offset, data_end, ip6->nexthdr);
     } else {
