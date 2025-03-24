@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,7 +29,7 @@ type STrafficMetrics struct {
 
 type SStatistics struct {
 	Mac         string          `json:"mac"`
-	IP          string          `json:"ip"`
+	IP          netip.Addr      `json:"ip"`
 	Hostname    string          `json:"hostname,omitempty"`
 	Upload      STrafficMetrics `json:"upload"`
 	Download    STrafficMetrics `json:"download"`
@@ -173,7 +174,7 @@ func (mc *SCollector) CollectPacket(packet *ebpf.SPacket) {
 		FirstSeenAt: time.Now().Unix(),
 		LastSeenAt:  time.Now().Unix(),
 	}
-	domains, err := net.LookupAddr(packet.SrcIP)
+	domains, err := net.LookupAddr(packet.SrcIP.String())
 	if err == nil {
 		for _, domain := range domains {
 			if domain != "" {

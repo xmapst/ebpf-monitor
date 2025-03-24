@@ -129,7 +129,8 @@ func (m *sManager) monitorEvents() {
 				continue
 			}
 			packet := pi.toPacket()
-			if packet.SrcIP == "" || packet.DstIP == "" {
+			if !packet.SrcIP.IsValid() || !packet.DstIP.IsValid() {
+				log.Println("invalid packet")
 				continue
 			}
 			m.eventCh <- pi.toPacket()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 )
 
@@ -71,10 +72,10 @@ type sPacketInfo struct {
 type SPacket struct {
 	Timestamp int64        `json:"timestamp"`
 	SrcMAC    string       `json:"src_mac"`
-	SrcIP     string       `json:"src_ip"`
-	SrcPort   uint16       `json:"src_port"`
 	DstMAC    string       `json:"dst_mac"`
-	DstIP     string       `json:"dst_ip"`
+	SrcIP     netip.Addr   `json:"src_ip"`
+	DstIP     netip.Addr   `json:"dst_ip"`
+	SrcPort   uint16       `json:"src_port"`
 	DstPort   uint16       `json:"dst_port"`
 	Size      uint32       `json:"size"`
 	EthType   EthernetType `json:"type"`
@@ -101,13 +102,13 @@ func (pi *sPacketInfo) DirectionStr() string {
 
 // ToPacket 转换PacketInfo 为 Packet
 func (pi *sPacketInfo) toPacket() *SPacket {
-	var srcIP, dstIP string
+	var srcIP, dstIP netip.Addr
 	if pi.EthType == EthernetType(0x0800) { // IPv4
-		srcIP = net.IP(pi.SrcIP[:]).String()
-		dstIP = net.IP(pi.DstIP[:]).String()
+		srcIP = netip.AddrFrom4(pi.SrcIP)
+		dstIP = netip.AddrFrom4(pi.DstIP)
 	} else if pi.EthType == EthernetType(0x86DD) { // IPv6
-		srcIP = net.IP(pi.SrcIPv6[:]).String()
-		dstIP = net.IP(pi.DstIPv6[:]).String()
+		srcIP = netip.AddrFrom16(pi.SrcIPv6)
+		dstIP = netip.AddrFrom16(pi.DstIPv6)
 	}
 
 	packet := &SPacket{

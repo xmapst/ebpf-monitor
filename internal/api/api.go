@@ -19,6 +19,7 @@ type sApi struct {
 }
 
 func New(manager ebpf.IManager, collector *metrics.SCollector) *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
 	api := &sApi{
 		manager:   manager,
 		collector: collector,
