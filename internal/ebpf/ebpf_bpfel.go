@@ -12,6 +12,21 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type ebpfPacketInfo struct {
+	SrcIp     uint32
+	DstIp     uint32
+	SrcIpv6   [4]uint32
+	DstIpv6   [4]uint32
+	SrcPort   uint16
+	DstPort   uint16
+	SrcMac    [6]uint8
+	DstMac    [6]uint8
+	EthProto  uint16
+	IpProto   uint16
+	Direction uint8
+	PktSize   uint32
+}
+
 // loadEbpf returns the embedded CollectionSpec for ebpf.
 func loadEbpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_EbpfBytes)
@@ -69,6 +84,7 @@ type ebpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ebpfVariableSpecs struct {
+	*ebpf.VariableSpec `ebpf:"__"`
 }
 
 // ebpfObjects contains all objects after they have been loaded into the kernel.
@@ -104,6 +120,7 @@ func (m *ebpfMaps) Close() error {
 //
 // It can be passed to loadEbpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ebpfVariables struct {
+	*ebpf.Variable `ebpf:"__"`
 }
 
 // ebpfPrograms contains all programs after they have been loaded into the kernel.

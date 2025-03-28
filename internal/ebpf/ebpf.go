@@ -32,6 +32,7 @@ type sManager struct {
 	cancel  context.CancelFunc
 	spec    *ebpf.CollectionSpec
 	objects *ebpfObjects
+	tcObjs  []*tc.Object
 	reader  *perf.Reader
 
 	ifname  string
@@ -92,33 +93,26 @@ func (m *sManager) Start() error {
 }
 
 func (m *sManager) addFilter(ifindex, fd uint32, parent uint32) error {
-	tcnl, err := tc.Open(&tc.Config{})
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	defer func() {
-		if e := tcnl.Close(); e != nil {
-			err = errors.WithStack(e)
+	return m.withTcnl(func(tcnl *tc.Tc) error {
+		tcObj := m.tcObject(ifindex, fd, parent)
+		err := tcnl.Filter().Add(tcObj)
+		if err != nil {
+			return errors.WithStack(err)
 		}
-	}()
 
-	tcObj := m.tcObject(ifindex, fd, parent)
-	err = tcnl.Filter().Add(tcObj)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	objs, e := tcnl.Filter().Get(&tcObj.Msg)
-	if e != nil {
-		return errors.WithStack(e)
-	}
-	for _, obj := range objs {
-		if obj.Attribute.BPF != nil && obj.Attribute.BPF.Name != nil && *obj.Attribute.BPF.Name == BpfName {
-			tcObj = &obj
-			return nil
+		objs, e := tcnl.Filter().Get(&tcObj.Msg)
+		if e != nil {
+			return errors.WithStack(e)
 		}
-	}
-	return nil
+		for _, obj := range objs {
+			if obj.Attribute.BPF != nil && obj.Attribute.BPF.Name != nil && *obj.Attribute.BPF.Name == BpfName {
+				tcObj = &obj
+				m.tcObjs = append(m.tcObjs, tcObj)
+				return nil
+			}
+		}
+		return nil
+	})
 }
 
 func (m *sManager) tcObject(ifindex, fd uint32, parent uint32) *tc.Object {
@@ -143,6 +137,20 @@ func (m *sManager) tcObject(ifindex, fd uint32, parent uint32) *tc.Object {
 func (m *sManager) htons(n uint16) uint16 {
 	b := *(*[2]byte)(unsafe.Pointer(&n))
 	return binary.BigEndian.Uint16(b[:])
+}
+
+func (m *sManager) withTcnl(fn func(nl *tc.Tc) error) (err error) {
+	tcnl, err := tc.Open(&tc.Config{})
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	defer func() {
+		if e := tcnl.Close(); e != nil {
+			err = errors.WithStack(e)
+		}
+	}()
+
+	return fn(tcnl)
 }
 
 func (m *sManager) monitorEvents() {
@@ -174,6 +182,14 @@ func (m *sManager) monitorEvents() {
 
 func (m *sManager) Close() {
 	m.cancel()
+	for _, tcOb := range m.tcObjs {
+		err := m.withTcnl(func(nl *tc.Tc) error {
+			return nl.Filter().Delete(tcOb)
+		})
+		if err != nil {
+			log.Println(err)
+		}
+	}
 	if m.reader != nil {
 		_ = m.reader.Close()
 	}

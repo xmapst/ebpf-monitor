@@ -22,9 +22,12 @@ struct packet_info {
     unsigned char dst_mac[ETH_ALEN];
     __u16 eth_proto;
     __u16 ip_proto;
-    __u32 pkt_size;
     __u8 direction;
+    __u32 pkt_size;
 } __attribute__((packed));
+
+// force emitting struct into the ELF.
+const struct packet_info *__ __attribute__((unused));
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);

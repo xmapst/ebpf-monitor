@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go ebpf ebpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -no-strip -type packet_info ebpf ebpf.c -- -I. -Wall
 
 type EthernetType uint16
 
@@ -57,8 +57,8 @@ type sPacketInfo struct {
 	DstMAC    [6]byte
 	EthType   EthernetType
 	IPProto   IPProtocol
-	PktSize   uint32
 	Direction uint8
+	PktSize   uint32
 }
 
 type SPacket struct {
