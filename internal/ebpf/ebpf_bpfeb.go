@@ -62,9 +62,7 @@ type ebpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ebpfMapSpecs struct {
-	Events       *ebpf.MapSpec `ebpf:"events"`
-	RateLimitMap *ebpf.MapSpec `ebpf:"rate_limit_map"`
-	TokenMap     *ebpf.MapSpec `ebpf:"token_map"`
+	Events *ebpf.MapSpec `ebpf:"events"`
 }
 
 // ebpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -93,16 +91,12 @@ func (o *ebpfObjects) Close() error {
 //
 // It can be passed to loadEbpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ebpfMaps struct {
-	Events       *ebpf.Map `ebpf:"events"`
-	RateLimitMap *ebpf.Map `ebpf:"rate_limit_map"`
-	TokenMap     *ebpf.Map `ebpf:"token_map"`
+	Events *ebpf.Map `ebpf:"events"`
 }
 
 func (m *ebpfMaps) Close() error {
 	return _EbpfClose(
 		m.Events,
-		m.RateLimitMap,
-		m.TokenMap,
 	)
 }
 

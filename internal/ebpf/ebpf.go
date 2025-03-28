@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"log"
-	"net"
 	"os"
-	"syscall"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/florianl/go-tc"
+	"github.com/florianl/go-tc/core"
+	"github.com/pkg/errors"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
+
+var BpfName = "bpf_monitor"
 
 type IManager interface {
 	Start() error
@@ -26,8 +30,8 @@ type IManager interface {
 type sManager struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
+	spec    *ebpf.CollectionSpec
 	objects *ebpfObjects
-	links   []*link.Link
 	reader  *perf.Reader
 
 	ifname  string
@@ -41,73 +45,104 @@ func New(ifname string, eventCh chan *SPacket) IManager {
 		cancel:  cancel,
 		ifname:  ifname,
 		eventCh: eventCh,
+		objects: &ebpfObjects{},
 	}
 }
 
 func (m *sManager) Start() error {
-	iface, err := net.InterfaceByName(m.ifname)
+	link, err := netlink.LinkByName(m.ifname)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 
 	if err = rlimit.RemoveMemlock(); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
-	var ebpfObj ebpfObjects
-	if err = loadEbpfObjects(&ebpfObj, &ebpf.CollectionOptions{
+
+	m.spec, err = loadEbpf()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	if err = m.spec.LoadAndAssign(m.objects, &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
 			LogLevel: ebpf.LogLevelInstruction,
 		},
 	}); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 
-	m.objects = &ebpfObj
-	err = m.attachTCXIngress(iface.Index)
+	linkAttrs := link.Attrs()
+	err = m.addFilter(uint32(linkAttrs.Index), uint32(m.objects.IngressProg.FD()), tc.HandleMinIngress)
 	if err != nil {
-		m.Close()
-		return err
+		return errors.WithStack(err)
 	}
-	err = m.attachTCXEgress(iface.Index)
+	err = m.addFilter(uint32(linkAttrs.Index), uint32(m.objects.EgressProg.FD()), tc.HandleMinEgress)
 	if err != nil {
-		m.Close()
-		return err
+		return errors.WithStack(err)
 	}
 
 	m.reader, err = perf.NewReader(m.objects.Events, os.Getpagesize())
 	if err != nil {
 		m.Close()
-		return err
+		return errors.WithStack(err)
 	}
 	go m.monitorEvents()
 	return nil
 }
 
-func (m *sManager) attachTCXIngress(index int) error {
-	l, err := link.AttachTCX(link.TCXOptions{
-		Program:   m.objects.IngressProg,
-		Interface: index,
-		Attach:    ebpf.AttachTCXIngress,
-	})
+func (m *sManager) addFilter(ifindex, fd uint32, parent uint32) error {
+	tcnl, err := tc.Open(&tc.Config{})
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
-	m.links = append(m.links, &l)
+	defer func() {
+		if e := tcnl.Close(); e != nil {
+			err = errors.WithStack(e)
+		}
+	}()
+
+	tcObj := m.tcObject(ifindex, fd, parent)
+	err = tcnl.Filter().Add(tcObj)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	objs, e := tcnl.Filter().Get(&tcObj.Msg)
+	if e != nil {
+		return errors.WithStack(e)
+	}
+	for _, obj := range objs {
+		if obj.Attribute.BPF != nil && obj.Attribute.BPF.Name != nil && *obj.Attribute.BPF.Name == BpfName {
+			tcObj = &obj
+			return nil
+		}
+	}
 	return nil
 }
 
-func (m *sManager) attachTCXEgress(index int) error {
-	l, err := link.AttachTCX(link.TCXOptions{
-		Program:   m.objects.EgressProg,
-		Interface: index,
-		Attach:    ebpf.AttachTCXEgress,
-		Anchor:    link.Head(),
-	})
-	if err != nil {
-		return err
+func (m *sManager) tcObject(ifindex, fd uint32, parent uint32) *tc.Object {
+	return &tc.Object{
+		Msg: tc.Msg{
+			Family:  unix.AF_UNSPEC,
+			Ifindex: ifindex,
+			Parent:  core.BuildHandle(tc.HandleRoot, parent),
+			Handle:  0,
+			Info:    1<<16 | uint32(m.htons(unix.ETH_P_ALL)),
+		},
+		Attribute: tc.Attribute{
+			Kind: "bpf",
+			BPF: &tc.Bpf{
+				FD:   &fd,
+				Name: &BpfName,
+			},
+		},
 	}
-	m.links = append(m.links, &l)
-	return nil
+}
+
+func (m *sManager) htons(n uint16) uint16 {
+	b := *(*[2]byte)(unsafe.Pointer(&n))
+	return binary.BigEndian.Uint16(b[:])
 }
 
 func (m *sManager) monitorEvents() {
@@ -130,7 +165,6 @@ func (m *sManager) monitorEvents() {
 			}
 			packet := pi.toPacket()
 			if !packet.SrcIP.IsValid() || !packet.DstIP.IsValid() {
-				log.Println("invalid packet")
 				continue
 			}
 			m.eventCh <- pi.toPacket()
@@ -143,9 +177,6 @@ func (m *sManager) Close() {
 	if m.reader != nil {
 		_ = m.reader.Close()
 	}
-	for _, l := range m.links {
-		_ = (*l).Close()
-	}
 	if m.objects != nil {
 		_ = m.objects.Close()
 	}
@@ -157,21 +188,6 @@ func (m *sManager) AddRule(sip string, limit int) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
 	}
-	ip := net.ParseIP(sip)
-	if ip == nil {
-		return errors.New("invalid sip")
-	}
-	var key ipKey
-	if ip4 := ip.To4(); ip4 != nil {
-		key.Family = syscall.AF_INET
-		copy(key.Addr[:4], ip4)
-	} else {
-		key.Family = syscall.AF_INET6
-		copy(key.Addr[:], ip.To16())
-	}
-	if err := m.objects.RateLimitMap.Put(key, uint32(limit)); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -179,21 +195,6 @@ func (m *sManager) AddRule(sip string, limit int) error {
 func (m *sManager) DelRule(sip string) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
-	}
-	ip := net.ParseIP(sip)
-	if ip == nil {
-		return errors.New("invalid sip")
-	}
-	var key ipKey
-	if ip4 := ip.To4(); ip4 != nil {
-		key.Family = syscall.AF_INET
-		copy(key.Addr[:4], ip4)
-	} else {
-		key.Family = syscall.AF_INET6
-		copy(key.Addr[:], ip.To16())
-	}
-	if err := m.objects.RateLimitMap.Delete(key); err != nil {
-		return err
 	}
 	return nil
 }

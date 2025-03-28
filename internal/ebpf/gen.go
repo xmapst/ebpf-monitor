@@ -18,16 +18,6 @@ func (et EthernetType) String() string {
 		return "IPv4"
 	case 0x86DD:
 		return "IPv6"
-	case 0x805:
-		return "RARP"
-	case 0x806:
-		return "ARP"
-	case 0x8847:
-		return "MPLS"
-	case 0x8848:
-		return "MPLS-TP"
-	case 0x8100:
-		return "VLAN"
 	default:
 		return fmt.Sprintf("0x%x", uint16(et))
 	}
@@ -41,6 +31,8 @@ type IPProtocol uint16
 
 func (protocol IPProtocol) String() string {
 	switch protocol {
+	case 1:
+		return "ICMP"
 	case 6:
 		return "TCP"
 	case 17:

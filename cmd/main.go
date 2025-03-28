@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +19,7 @@ import (
 )
 
 func init() {
-	runtime.LockOSThread()
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 func main() {

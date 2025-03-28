@@ -101,7 +101,7 @@ func (mc *SCollector) load() (*SMetricsSummary, error) {
 }
 
 func (mc *SCollector) autoPersist() {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

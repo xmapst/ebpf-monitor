@@ -1,7 +1,8 @@
 
 IMAGE := ebpf-monitor:latest
 
-PHONY: build
+.PHONY: build init
+
 build:
 	go generate ./...
 	go mod tidy
@@ -11,7 +12,6 @@ build:
 	GOARCH=arm64 go build -ldflags="-s -w" -trimpath -o bin/ebpf-monitor_linux-arm64 cmd/main.go
 	upx -9 bin/*
 
-PHONY: init
 init:
 	apt-get update
 	apt-get install -y llvm clang git curl wget tree libbpf-dev build-essential linux-headers-generic
