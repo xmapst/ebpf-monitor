@@ -73,14 +73,9 @@ func (m *sManager) Start() error {
 		return errors.WithStack(err)
 	}
 
-	linkAttrs := link.Attrs()
-	err = m.addFilter(uint32(linkAttrs.Index), uint32(m.objects.IngressProg.FD()), tc.HandleMinIngress)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	err = m.addFilter(uint32(linkAttrs.Index), uint32(m.objects.EgressProg.FD()), tc.HandleMinEgress)
-	if err != nil {
-		return errors.WithStack(err)
+	if err = m.attachIface(link); err != nil {
+		m.Close()
+		return err
 	}
 
 	m.reader, err = perf.NewReader(m.objects.Events, os.Getpagesize())
@@ -90,6 +85,19 @@ func (m *sManager) Start() error {
 	}
 	go m.monitorEvents()
 	return nil
+}
+
+func (m *sManager) attachIface(link netlink.Link) (err error) {
+	ifindex := uint32(link.Attrs().Index)
+	err = m.addFilter(ifindex, uint32(m.objects.IngressProg.FD()), tc.HandleMinIngress)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	err = m.addFilter(ifindex, uint32(m.objects.EgressProg.FD()), tc.HandleMinEgress)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	return
 }
 
 func (m *sManager) addFilter(ifindex, fd uint32, parent uint32) error {
@@ -175,6 +183,7 @@ func (m *sManager) monitorEvents() {
 			if !packet.SrcIP.IsValid() || !packet.DstIP.IsValid() {
 				continue
 			}
+			//fmt.Printf("%s\t%s %s --> %s %s\t%s#%s\n", packet.Direction, packet.SrcMAC, packet.SrcIP, packet.DstMAC, packet.DstIP, packet.EthType, packet.IPProto)
 			m.eventCh <- pi.toPacket()
 		}
 	}
@@ -204,6 +213,7 @@ func (m *sManager) AddRule(sip string, limit int) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
 	}
+	// TODO: add tc qdisc to add rate limit
 	return nil
 }
 
@@ -212,5 +222,6 @@ func (m *sManager) DelRule(sip string) error {
 	if m.objects == nil {
 		return errors.New("ebpf objects is nil")
 	}
+	// TODO: del tc qdisc to add rate limit
 	return nil
 }
